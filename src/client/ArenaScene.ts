@@ -1,43 +1,37 @@
 import Phaser from 'phaser';
 import { ARENA } from '../shared/arena';
-import { hits, spawnPlane, stepBullets, stepPlane } from '../shared/physics';
 import { PLANES } from '../shared/planes';
-import type { Bullet, PlaneInput, PlaneState } from '../shared/types';
+import type { PlayerSnapshot } from '../shared/protocol';
+import type { PlaneInput } from '../shared/types';
+import type { KillEvent, Network } from './network';
 import { makeTextures } from './textures';
 
-const PLAYER_ID = 'local';
-const DRONE_COUNT = 6;
-const DRONE_HP = 40;
-const DRONE_RADIUS = 18;
-const DRONE_RESPAWN_MS = 3000;
+const ENEMY_TINT = 0xff8a7a;
+const FEED_SIZE = 5;
+const FEED_TTL_MS = 6000;
 
-interface Drone {
+interface PlaneView {
   sprite: Phaser.GameObjects.Image;
-  hp: number;
-  alive: boolean;
-  // Drones fly a slow circle around a fixed center.
-  cx: number;
-  cy: number;
-  orbit: number;
-  phase: number;
-  spin: number;
+  label: Phaser.GameObjects.Text;
+  exhaust: Phaser.GameObjects.Particles.ParticleEmitter;
 }
 
 export class ArenaScene extends Phaser.Scene {
-  private spec = PLANES.f22;
-  private player!: PlaneState;
-  private playerSprite!: Phaser.GameObjects.Image;
-  private exhaust!: Phaser.GameObjects.Particles.ParticleEmitter;
-  private explosions!: Phaser.GameObjects.Particles.ParticleEmitter;
-  private bullets: Bullet[] = [];
+  private views = new Map<string, PlaneView>();
   private bulletSprites: Phaser.GameObjects.Image[] = [];
-  private drones: Drone[] = [];
-  private kills = 0;
+  private explosions!: Phaser.GameObjects.Particles.ParticleEmitter;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
   private hud!: Phaser.GameObjects.Text;
   private hpBar!: Phaser.GameObjects.Graphics;
+  private board!: Phaser.GameObjects.Text;
+  private feedText!: Phaser.GameObjects.Text;
+  private banner!: Phaser.GameObjects.Text;
+  private help!: Phaser.GameObjects.Text;
+  private feed: { text: string; at: number }[] = [];
+  private lastKiller = '';
+  private names = new Map<string, string>();
 
-  constructor() {
+  constructor(private net: Network) {
     super('arena');
   }
 
@@ -47,61 +41,50 @@ export class ArenaScene extends Phaser.Scene {
     this.add.tileSprite(0, 0, ARENA.width, ARENA.height, 'grid').setOrigin(0);
     this.add.rectangle(0, 0, ARENA.width, ARENA.height).setOrigin(0).setStrokeStyle(4, 0x3a5a9a);
 
-    this.player = spawnPlane(this.spec, ARENA.width / 2, ARENA.height / 2);
-    this.exhaust = this.add.particles(0, 0, 'dot', {
-      lifespan: 350,
-      speed: { min: 10, max: 40 },
-      scale: { start: 0.7, end: 0 },
-      alpha: { start: 0.6, end: 0 },
-      tint: [0xffb347, 0xff6a3d],
-      frequency: 16,
-    });
-    this.playerSprite = this.add.image(this.player.x, this.player.y, 'jet').setTint(this.spec.color);
+    this.explosions = this.add
+      .particles(0, 0, 'dot', {
+        lifespan: 700,
+        speed: { min: 60, max: 280 },
+        scale: { start: 1.8, end: 0 },
+        tint: [0xffe58a, 0xff8c42, 0xd9534f],
+        emitting: false,
+      })
+      .setDepth(5);
 
-    this.explosions = this.add.particles(0, 0, 'dot', {
-      lifespan: 600,
-      speed: { min: 60, max: 260 },
-      scale: { start: 1.6, end: 0 },
-      tint: [0xffe58a, 0xff8c42, 0xd9534f],
-      emitting: false,
-    });
-
-    for (let i = 0; i < DRONE_COUNT; i++) this.drones.push(this.makeDrone());
-
-    const cam = this.cameras.main;
-    cam.setBounds(-200, -200, ARENA.width + 400, ARENA.height + 400);
-    cam.startFollow(this.playerSprite, true, 0.12, 0.12);
+    this.cameras.main.setBounds(-200, -200, ARENA.width + 400, ARENA.height + 400);
 
     const kb = this.input.keyboard!;
     this.keys = kb.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE') as Record<string, Phaser.Input.Keyboard.Key>;
     kb.addCapture('SPACE,UP,DOWN,LEFT,RIGHT');
 
-    this.hpBar = this.add.graphics().setScrollFactor(0);
-    this.hud = this.add
-      .text(16, 40, '', { fontFamily: 'monospace', fontSize: '14px', color: '#cfe0ff' })
-      .setScrollFactor(0);
-    this.add
-      .text(16, 0, 'W/S throttle · A/D turn · SPACE fire', {
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        color: '#7f93bf',
-      })
+    const font = { fontFamily: 'monospace', fontSize: '14px', color: '#cfe0ff' };
+    this.hpBar = this.add.graphics().setScrollFactor(0).setDepth(10);
+    this.hud = this.add.text(16, 40, '', font).setScrollFactor(0).setDepth(10);
+    this.board = this.add.text(0, 16, '', { ...font, align: 'right' }).setScrollFactor(0).setDepth(10).setOrigin(1, 0);
+    this.feedText = this.add.text(0, 0, '', { ...font, align: 'right', color: '#ffd28a' }).setScrollFactor(0).setDepth(10).setOrigin(1, 0);
+    this.banner = this.add
+      .text(0, 0, '', { ...font, fontSize: '22px', color: '#ffffff', align: 'center' })
       .setScrollFactor(0)
-      .setName('help');
-    this.scale.on('resize', () => this.layoutHelp());
-    this.layoutHelp();
+      .setDepth(10)
+      .setOrigin(0.5);
+    this.help = this.add
+      .text(16, 0, 'W/S throttle · A/D turn · SPACE fire', { ...font, fontSize: '12px', color: '#7f93bf' })
+      .setScrollFactor(0)
+      .setDepth(10);
+    this.scale.on('resize', () => this.layout());
+    this.layout();
+
+    this.net.onKill = (e) => this.handleKill(e);
   }
 
-  update(_time: number, deltaMs: number): void {
-    const dt = Math.min(deltaMs / 1000, 0.05);
+  update(): void {
+    this.net.sendInput(this.readInput());
 
-    const shot = stepPlane(this.player, this.spec, this.readInput(), dt, PLAYER_ID);
-    if (shot) this.bullets.push(shot);
-    stepBullets(this.bullets, dt);
-
-    this.updateDrones(dt);
-    this.resolveHits();
-    this.render();
+    const players = this.net.interpolatedPlayers();
+    for (const p of players) this.names.set(p.id, p.name);
+    this.syncPlanes(players);
+    this.syncBullets();
+    this.updateHud(players);
   }
 
   private readInput(): PlaneInput {
@@ -117,83 +100,101 @@ export class ArenaScene extends Phaser.Scene {
     };
   }
 
-  private makeDrone(): Drone {
-    const margin = 300;
-    const drone: Drone = {
-      sprite: this.add.image(0, 0, 'drone'),
-      hp: DRONE_HP,
-      alive: true,
-      cx: Phaser.Math.Between(margin, ARENA.width - margin),
-      cy: Phaser.Math.Between(margin, ARENA.height - margin),
-      orbit: Phaser.Math.Between(80, 220),
-      phase: Math.random() * Math.PI * 2,
-      spin: Phaser.Math.FloatBetween(0.3, 0.8) * (Math.random() < 0.5 ? -1 : 1),
-    };
-    return drone;
-  }
-
-  private updateDrones(dt: number): void {
-    for (const d of this.drones) {
-      if (!d.alive) continue;
-      d.phase += d.spin * dt;
-      d.sprite.setPosition(d.cx + Math.cos(d.phase) * d.orbit, d.cy + Math.sin(d.phase) * d.orbit);
+  private syncPlanes(players: PlayerSnapshot[]): void {
+    const seen = new Set<string>();
+    for (const p of players) {
+      seen.add(p.id);
+      let view = this.views.get(p.id);
+      if (!view) {
+        view = this.makeView(p);
+        this.views.set(p.id, view);
+      }
+      const { sprite, label, exhaust } = view;
+      sprite.setVisible(p.alive).setPosition(p.x, p.y).setRotation(p.angle);
+      // Blink while spawn-shielded.
+      sprite.setAlpha(p.shielded ? 0.4 + 0.4 * Math.sin(this.time.now / 60) : 1);
+      label.setVisible(p.alive).setPosition(p.x, p.y - 36);
+      exhaust.emitting = p.alive;
+      exhaust.setPosition(p.x - Math.cos(p.angle) * 26, p.y - Math.sin(p.angle) * 26);
+    }
+    for (const [id, view] of this.views) {
+      if (seen.has(id)) continue;
+      view.sprite.destroy();
+      view.label.destroy();
+      view.exhaust.destroy();
+      this.views.delete(id);
     }
   }
 
-  private resolveHits(): void {
-    for (let i = this.bullets.length - 1; i >= 0; i--) {
-      const b = this.bullets[i];
-      const target = this.drones.find((d) => d.alive && hits(b, d.sprite.x, d.sprite.y, DRONE_RADIUS));
-      if (!target) continue;
-      this.bullets.splice(i, 1);
-      target.hp -= b.damage;
-      target.sprite.setTintFill(0xffffff);
-      this.time.delayedCall(60, () => target.sprite.clearTint());
-      if (target.hp <= 0) this.killDrone(target);
-    }
-  }
-
-  private killDrone(d: Drone): void {
-    d.alive = false;
-    d.sprite.setVisible(false);
-    this.explosions.explode(40, d.sprite.x, d.sprite.y);
-    this.cameras.main.shake(120, 0.004);
-    this.kills++;
-    this.time.delayedCall(DRONE_RESPAWN_MS, () => {
-      const fresh = this.makeDrone();
-      d.sprite.destroy();
-      Object.assign(d, fresh);
+  private makeView(p: PlayerSnapshot): PlaneView {
+    const mine = p.id === this.net.myId;
+    const exhaust = this.add.particles(0, 0, 'dot', {
+      lifespan: 350,
+      speed: { min: 10, max: 40 },
+      scale: { start: 0.7, end: 0 },
+      alpha: { start: 0.6, end: 0 },
+      tint: [0xffb347, 0xff6a3d],
+      frequency: 16,
     });
+    const sprite = this.add.image(p.x, p.y, 'jet').setTint(mine ? PLANES[p.planeId].color : ENEMY_TINT);
+    const label = this.add
+      .text(p.x, p.y, p.name, { fontFamily: 'monospace', fontSize: '12px', color: mine ? '#cfe0ff' : '#ffb3a8' })
+      .setOrigin(0.5);
+    if (mine) this.cameras.main.startFollow(sprite, true, 0.15, 0.15);
+    return { sprite, label, exhaust };
   }
 
-  private render(): void {
-    const p = this.player;
-    this.playerSprite.setPosition(p.x, p.y).setRotation(p.angle);
-    const tail = 26;
-    this.exhaust.setPosition(p.x - Math.cos(p.angle) * tail, p.y - Math.sin(p.angle) * tail);
-
-    // Reuse bullet sprites instead of creating one per shot.
-    while (this.bulletSprites.length < this.bullets.length) {
-      this.bulletSprites.push(this.add.image(0, 0, 'bullet'));
-    }
+  private syncBullets(): void {
+    const bullets = this.net.latest()?.bullets ?? [];
+    while (this.bulletSprites.length < bullets.length) this.bulletSprites.push(this.add.image(0, 0, 'bullet'));
     this.bulletSprites.forEach((s, i) => {
-      const b = this.bullets[i];
+      const b = bullets[i];
       s.setVisible(!!b);
-      if (b) s.setPosition(b.x, b.y).setRotation(Math.atan2(b.vy, b.vx));
+      if (b) s.setPosition(b.x, b.y).setRotation(b.angle);
     });
-
-    const hpFrac = p.hp / this.spec.maxHp;
-    this.hpBar.clear();
-    this.hpBar.fillStyle(0x1a2440).fillRect(16, 16, 200, 14);
-    this.hpBar.fillStyle(hpFrac > 0.3 ? 0x4cd97b : 0xd9534f).fillRect(16, 16, 200 * hpFrac, 14);
-
-    this.hud.setText(
-      `${this.spec.name}\nSPD ${Math.round(p.speed)}\nKILLS ${this.kills}`,
-    );
   }
 
-  private layoutHelp(): void {
-    const help = this.children.getByName('help') as Phaser.GameObjects.Text | null;
-    help?.setPosition(16, this.scale.height - 28);
+  private handleKill(e: KillEvent): void {
+    this.explosions.explode(50, e.x, e.y);
+    const cam = this.cameras.main;
+    if (Phaser.Math.Distance.Between(cam.midPoint.x, cam.midPoint.y, e.x, e.y) < 700) cam.shake(150, 0.005);
+    if (e.victim === this.net.myId) this.lastKiller = this.names.get(e.killer) ?? 'someone';
+    const killer = this.names.get(e.killer) ?? '?';
+    const victim = this.names.get(e.victim) ?? '?';
+    this.feed.push({ text: `${killer} ✈ ${victim}`, at: this.time.now });
+    if (this.feed.length > FEED_SIZE) this.feed.shift();
+  }
+
+  private updateHud(players: PlayerSnapshot[]): void {
+    const me = players.find((p) => p.id === this.net.myId);
+
+    this.hpBar.clear();
+    if (me) {
+      const spec = PLANES[me.planeId];
+      const frac = Math.max(0, me.hp / spec.maxHp);
+      this.hpBar.fillStyle(0x1a2440).fillRect(16, 16, 200, 14);
+      this.hpBar.fillStyle(frac > 0.3 ? 0x4cd97b : 0xd9534f).fillRect(16, 16, 200 * frac, 14);
+      this.hud.setText(`${spec.name}\nSPD ${me.speed}\nK ${me.kills}  D ${me.deaths}`);
+    } else {
+      this.hud.setText(this.net.connected ? 'Joining…' : 'Connecting to server…');
+    }
+
+    this.banner.setText(me && !me.alive ? `Shot down by ${this.lastKiller}\nRespawning…` : '');
+
+    const top = [...players].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths).slice(0, 5);
+    this.board.setText(
+      [`PILOTS ${players.length}`, ...top.map((p) => `${p.name.padEnd(16)} ${String(p.kills).padStart(3)}`)].join('\n'),
+    );
+
+    this.feed = this.feed.filter((f) => this.time.now - f.at < FEED_TTL_MS);
+    this.feedText.setText(this.feed.map((f) => f.text).join('\n'));
+  }
+
+  private layout(): void {
+    const { width, height } = this.scale;
+    this.board.setX(width - 16);
+    this.feedText.setPosition(width - 16, 140);
+    this.banner.setPosition(width / 2, height / 2 - 80);
+    this.help.setY(height - 28);
   }
 }

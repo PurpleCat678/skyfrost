@@ -28,14 +28,6 @@ export function makeTextures(scene: Phaser.Scene): void {
   g.fillEllipse(38, 24, 10, 5); // cockpit
   g.generateTexture('jet', 56, 48);
 
-  // Practice drone.
-  g.clear();
-  g.fillStyle(0xd9534f);
-  g.fillCircle(20, 20, 14);
-  g.lineStyle(3, 0xffd2d0);
-  g.strokeCircle(20, 20, 18);
-  g.generateTexture('drone', 40, 40);
-
   // Bullet tracer.
   g.clear();
   g.fillStyle(0xffe58a);
