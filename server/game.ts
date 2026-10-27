@@ -1,7 +1,8 @@
 import { ARENA } from '../src/shared/arena';
 import { hits, spawnPlane, stepBullets, stepMissiles, stepPlane } from '../src/shared/physics';
-import { PLANES } from '../src/shared/planes';
+import { PLANES, PLANE_ORDER } from '../src/shared/planes';
 import {
+  MAX_BOTS,
   MAX_NAME_LENGTH,
   PLANE_RADIUS,
   RESPAWN_MS,
@@ -11,7 +12,8 @@ import {
   type ServerMessage,
 } from '../src/shared/protocol';
 import type { Bullet, Missile, PlaneInput, PlaneState } from '../src/shared/types';
-import { MISSILE, blastDamage } from '../src/shared/weapons';
+import { LOCK, MISSILE, blastDamage } from '../src/shared/weapons';
+import { BOT_NAMES, botInput, newBrain, type BotBrain } from './bot';
 
 interface Player {
   id: string;
@@ -23,11 +25,14 @@ interface Player {
   respawnAt: number;
   shieldUntil: number;
   pingOffset: number; // staggers stealth pings between players
+  brain: BotBrain | null; // set for AI pilots
+  lockTargetId: string | null;
+  lockTime: number; // seconds the cursor has stayed on lockTargetId
   kills: number;
   deaths: number;
 }
 
-const NO_INPUT: PlaneInput = { turn: 0, throttle: 0, fire: false, missile: false, skill: false };
+const NO_INPUT: PlaneInput = { turn: 0, throttle: 0, fire: false, missile: false, skill: false, aimX: 0, aimY: 0 };
 
 /** The authoritative free-for-all match. One instance per server. */
 export class Game {
@@ -37,7 +42,7 @@ export class Game {
 
   constructor(private broadcast: (msg: ServerMessage) => void) {}
 
-  join(id: string, rawName: string, planeId: string): void {
+  join(id: string, rawName: string, planeId: string, brain: BotBrain | null = null): void {
     const name = rawName.trim().slice(0, MAX_NAME_LENGTH) || `Pilot ${id.slice(0, 4)}`;
     const spec = PLANES[planeId] ?? PLANES.f22;
     const player: Player = {
@@ -50,6 +55,9 @@ export class Game {
       respawnAt: 0,
       shieldUntil: 0,
       pingOffset: Math.random() * STEALTH_PING_EVERY_MS,
+      brain,
+      lockTargetId: null,
+      lockTime: 0,
       kills: 0,
       deaths: 0,
     };
@@ -59,6 +67,19 @@ export class Game {
 
   leave(id: string): void {
     this.players.delete(id);
+  }
+
+  /** Adds or removes AI pilots until there are exactly `count`. */
+  setBotCount(count: number): void {
+    const want = Math.max(0, Math.min(MAX_BOTS, Math.floor(Number(count) || 0)));
+    const bots = [...this.players.values()].filter((p) => p.brain);
+    for (const b of bots.slice(want)) this.leave(b.id);
+    for (let i = bots.length; i < want; i++) {
+      const taken = new Set([...this.players.values()].map((p) => p.name));
+      const name = BOT_NAMES.find((n) => !taken.has(`AI ${n}`)) ?? `${i + 1}`;
+      const planeId = PLANE_ORDER[Math.floor(Math.random() * PLANE_ORDER.length)];
+      this.join(`bot-${name}-${Date.now()}`, `AI ${name}`, planeId, newBrain());
+    }
   }
 
   setInput(id: string, input: PlaneInput): void {
@@ -71,6 +92,8 @@ export class Game {
       fire: input.fire === true,
       missile: input.missile === true,
       skill: input.skill === true,
+      aimX: finiteOr(input.aimX, p.state.x),
+      aimY: finiteOr(input.aimY, p.state.y),
     };
   }
 
@@ -83,15 +106,22 @@ export class Game {
         continue;
       }
       const spec = PLANES[p.planeId];
+      if (p.brain) p.input = botInput(p.brain, p.state, p.planeId, this.enemiesOf(p), this.lockProgress(p), dt);
+      this.updateLock(p, dt);
       // Shielded planes can't fire, so spawn protection can't be abused.
       const input = now < p.shieldUntil ? { ...p.input, fire: false, missile: false } : p.input;
-      const shots = stepPlane(p.state, spec, input, dt, p.id);
+      const lock = { targetId: p.lockTargetId, progress: this.lockProgress(p) };
+      const shots = stepPlane(p.state, spec, input, dt, p.id, lock);
       if (shots.bullet) this.bullets.push(shots.bullet);
       if (shots.missile) this.missiles.push(shots.missile);
     }
 
     stepBullets(this.bullets, dt);
-    for (const m of stepMissiles(this.missiles, dt)) this.explode(m, now);
+    const findTarget = (id: string) => {
+      const t = this.players.get(id);
+      return t && t.alive ? t.state : null;
+    };
+    for (const m of stepMissiles(this.missiles, dt, findTarget)) this.explode(m, now);
     this.resolveBulletHits(now);
     this.resolveMissileHits(now);
 
@@ -110,13 +140,52 @@ export class Game {
         alive: p.alive,
         shielded: now < p.shieldUntil,
         onRadar: this.onRadar(p, now),
+        bot: p.brain !== null,
         missiles: p.state.missiles,
+        heat: Math.round(p.state.heat * 100) / 100,
+        overheated: p.state.overheated,
+        lockTarget: p.lockTargetId,
+        lock: Math.round(this.lockProgress(p) * 100) / 100,
         kills: p.kills,
         deaths: p.deaths,
       })),
       bullets: this.bullets.map(snapProjectile),
       missiles: this.missiles.map(snapProjectile),
     });
+  }
+
+  private enemiesOf(p: Player): { id: string; state: PlaneState }[] {
+    const now = Date.now();
+    return [...this.players.values()].filter((e) => e !== p && e.alive && now >= e.shieldUntil);
+  }
+
+  private lockProgress(p: Player): number {
+    if (!p.lockTargetId) return 0;
+    return Math.min(1, p.lockTime / PLANES[p.planeId].lockTime);
+  }
+
+  /** Locks onto the enemy under the cursor; moving off it, or it dying, starts over. */
+  private updateLock(p: Player, dt: number): void {
+    let hovered: Player | null = null;
+    let best = LOCK.hoverRadius;
+    for (const e of this.players.values()) {
+      if (e === p || !e.alive) continue;
+      if (Math.hypot(e.state.x - p.state.x, e.state.y - p.state.y) > LOCK.maxRange) continue;
+      const d = Math.hypot(e.state.x - p.input.aimX, e.state.y - p.input.aimY);
+      if (d <= best) {
+        best = d;
+        hovered = e;
+      }
+    }
+    if (!hovered) {
+      p.lockTargetId = null;
+      p.lockTime = 0;
+    } else if (hovered.id !== p.lockTargetId) {
+      p.lockTargetId = hovered.id;
+      p.lockTime = 0;
+    } else {
+      p.lockTime += dt;
+    }
   }
 
   private onRadar(p: Player, now: number): boolean {
@@ -140,7 +209,9 @@ export class Game {
     for (let i = this.missiles.length - 1; i >= 0; i--) {
       const m = this.missiles[i];
       for (const p of this.players.values()) {
-        if (!p.alive || p.id === m.ownerId || !hits(m, p.state.x, p.state.y, MISSILE.hitRadius)) continue;
+        const fused = m.targetId === p.id && m.turnRate >= MISSILE.fullLockTurn;
+        const radius = fused ? MISSILE.proximityFuse : MISSILE.hitRadius;
+        if (!p.alive || p.id === m.ownerId || !hits(m, p.state.x, p.state.y, radius)) continue;
         this.missiles.splice(i, 1);
         this.explode(m, now);
         break;
@@ -184,11 +255,17 @@ export class Game {
     p.state = spawnPlane(spec, x, y, angle);
     p.alive = true;
     p.shieldUntil = now + SPAWN_SHIELD_MS;
+    p.lockTargetId = null;
+    p.lockTime = 0;
   }
 }
 
 function snapProjectile(b: { x: number; y: number; vx: number; vy: number }) {
   return { x: Math.round(b.x), y: Math.round(b.y), angle: Math.round(Math.atan2(b.vy, b.vx) * 100) / 100 };
+}
+
+function finiteOr(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
 
 function clampUnit(v: unknown): number {

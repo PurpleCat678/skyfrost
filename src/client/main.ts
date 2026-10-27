@@ -3,8 +3,8 @@ import { ArenaScene } from './ArenaScene';
 import { Network } from './network';
 import { setupPicker } from './picker';
 
-setupPicker((name, planeId) => {
-  const net = new Network(name, planeId);
+setupPicker((name, planeId, bots) => {
+  const net = new Network(name, planeId, bots);
   new Phaser.Game({
     type: Phaser.AUTO,
     backgroundColor: '#0b1020',

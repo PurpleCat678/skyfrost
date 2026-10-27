@@ -30,6 +30,8 @@ export class ArenaScene extends Phaser.Scene {
   private hud!: Phaser.GameObjects.Text;
   private hpBar!: Phaser.GameObjects.Graphics;
   private radar!: Phaser.GameObjects.Graphics;
+  private lockRing!: Phaser.GameObjects.Graphics;
+  private lockText!: Phaser.GameObjects.Text;
   private board!: Phaser.GameObjects.Text;
   private feedText!: Phaser.GameObjects.Text;
   private banner!: Phaser.GameObjects.Text;
@@ -72,6 +74,12 @@ export class ArenaScene extends Phaser.Scene {
     this.keys = kb.addKeys('W,A,S,D,F,UP,DOWN,LEFT,RIGHT,SPACE,SHIFT') as Record<string, Phaser.Input.Keyboard.Key>;
     kb.addCapture('SPACE,UP,DOWN,LEFT,RIGHT,SHIFT');
     this.input.mouse?.disableContextMenu();
+    this.input.setDefaultCursor('crosshair');
+    this.lockRing = this.add.graphics().setDepth(6);
+    this.lockText = this.add
+      .text(0, 0, 'LOCK', { fontFamily: 'monospace', fontSize: '12px', color: '#ff5a4a' })
+      .setOrigin(0.5)
+      .setDepth(6);
 
     const font = { fontFamily: 'monospace', fontSize: '14px', color: '#cfe0ff' };
     this.hpBar = this.add.graphics().setScrollFactor(0).setDepth(10);
@@ -89,7 +97,7 @@ export class ArenaScene extends Phaser.Scene {
       .setDepth(10)
       .setOrigin(0.5);
     this.help = this.add
-      .text(16, 0, 'W/S throttle · A/D turn · SPACE guns · F or right-click missile · SHIFT skill', {
+      .text(16, 0, 'W/S throttle · A/D turn · SPACE/left-click guns · hover to lock · F/right-click missile · SHIFT skill', {
         ...font,
         fontSize: '12px',
         color: '#7f93bf',
@@ -115,10 +123,13 @@ export class ArenaScene extends Phaser.Scene {
     for (const m of snap?.missiles ?? []) this.smoke.emitParticleAt(m.x - Math.cos(m.angle) * 10, m.y - Math.sin(m.angle) * 10);
     this.updateHud(players);
     this.drawRadar(players);
+    this.drawLock(players);
   }
 
   private readInput(): PlaneInput {
     const k = this.keys;
+    const pointer = this.input.activePointer;
+    const aim = pointer.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
     const left = k.A.isDown || k.LEFT.isDown;
     const right = k.D.isDown || k.RIGHT.isDown;
     const up = k.W.isDown || k.UP.isDown;
@@ -126,9 +137,11 @@ export class ArenaScene extends Phaser.Scene {
     return {
       turn: (right ? 1 : 0) - (left ? 1 : 0),
       throttle: (up ? 1 : 0) - (down ? 1 : 0),
-      fire: k.SPACE.isDown,
-      missile: k.F.isDown || this.input.activePointer.rightButtonDown(),
+      fire: k.SPACE.isDown || pointer.leftButtonDown(),
+      missile: k.F.isDown || pointer.rightButtonDown(),
       skill: k.SHIFT.isDown,
+      aimX: aim.x,
+      aimY: aim.y,
     };
   }
 
@@ -215,9 +228,14 @@ export class ArenaScene extends Phaser.Scene {
       const frac = Math.max(0, me.hp / spec.maxHp);
       this.hpBar.fillStyle(0x1a2440).fillRect(16, 16, 200, 14);
       this.hpBar.fillStyle(frac > 0.3 ? 0x4cd97b : 0xd9534f).fillRect(16, 16, 200 * frac, 14);
+      // Gun heat, flashing red while overheated.
+      const flash = me.overheated && Math.floor(this.time.now / 150) % 2 === 0;
+      const heatY = this.hud.y + this.hud.height + 2;
+      this.hpBar.fillStyle(0x1a2440).fillRect(16, heatY, 200, 6);
+      this.hpBar.fillStyle(me.overheated ? (flash ? 0xff3b30 : 0x7a1f1a) : 0xffb347).fillRect(16, heatY, 200 * me.heat, 6);
       const pips = '▮'.repeat(me.missiles) + '▯'.repeat(spec.missiles - me.missiles);
       this.hud.setText(
-        `${spec.name}\nMACH ${(me.speed / PX_PER_MACH).toFixed(2)}\nMSL  ${pips}\nK ${me.kills}  D ${me.deaths}`,
+        `${spec.name}\nMACH ${(me.speed / PX_PER_MACH).toFixed(2)}\nMSL  ${pips}\nK ${me.kills}  D ${me.deaths}\n${me.overheated ? 'GUNS OVERHEATED' : 'GUN HEAT'}`,
       );
     } else {
       this.hud.setText(this.net.connected ? 'Joining…' : 'Connecting to server…');
@@ -283,6 +301,32 @@ export class ArenaScene extends Phaser.Scene {
       cx + Math.cos(a - 2.5) * 5,
       cy + Math.sin(a - 2.5) * 5,
     );
+  }
+
+  /** Your lock-on ring: it closes in on the target as the lock builds. Only you see it. */
+  private drawLock(players: PlayerSnapshot[]): void {
+    const g = this.lockRing;
+    g.clear();
+    this.lockText.setVisible(false);
+    const me = players.find((p) => p.id === this.net.myId);
+    const target = me?.alive && me.lockTarget ? players.find((p) => p.id === me.lockTarget) : undefined;
+    if (!me || !target || !target.alive) return;
+
+    const full = me.lock >= 1;
+    const radius = 70 - 44 * me.lock;
+    const color = full ? 0xff3b30 : 0xffd28a;
+    g.lineStyle(full ? 3 : 2, color, full ? 1 : 0.85).strokeCircle(target.x, target.y, radius);
+    // Four ticks that make the ring read as a seeker reticle.
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2 + (full ? 0 : this.time.now / 400);
+      g.lineBetween(
+        target.x + Math.cos(a) * radius,
+        target.y + Math.sin(a) * radius,
+        target.x + Math.cos(a) * (radius + 8),
+        target.y + Math.sin(a) * (radius + 8),
+      );
+    }
+    if (full) this.lockText.setVisible(true).setPosition(target.x, target.y + radius + 12);
   }
 
   private layout(): void {
