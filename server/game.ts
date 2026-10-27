@@ -1,14 +1,17 @@
 import { ARENA } from '../src/shared/arena';
-import { hits, spawnPlane, stepBullets, stepPlane } from '../src/shared/physics';
+import { hits, spawnPlane, stepBullets, stepMissiles, stepPlane } from '../src/shared/physics';
 import { PLANES } from '../src/shared/planes';
 import {
   MAX_NAME_LENGTH,
   PLANE_RADIUS,
   RESPAWN_MS,
   SPAWN_SHIELD_MS,
+  STEALTH_PING_EVERY_MS,
+  STEALTH_PING_MS,
   type ServerMessage,
 } from '../src/shared/protocol';
-import type { Bullet, PlaneInput, PlaneState } from '../src/shared/types';
+import type { Bullet, Missile, PlaneInput, PlaneState } from '../src/shared/types';
+import { MISSILE, blastDamage } from '../src/shared/weapons';
 
 interface Player {
   id: string;
@@ -19,16 +22,18 @@ interface Player {
   alive: boolean;
   respawnAt: number;
   shieldUntil: number;
+  pingOffset: number; // staggers stealth pings between players
   kills: number;
   deaths: number;
 }
 
-const NO_INPUT: PlaneInput = { turn: 0, throttle: 0, fire: false };
+const NO_INPUT: PlaneInput = { turn: 0, throttle: 0, fire: false, missile: false, skill: false };
 
 /** The authoritative free-for-all match. One instance per server. */
 export class Game {
   private players = new Map<string, Player>();
   private bullets: Bullet[] = [];
+  private missiles: Missile[] = [];
 
   constructor(private broadcast: (msg: ServerMessage) => void) {}
 
@@ -44,6 +49,7 @@ export class Game {
       alive: true,
       respawnAt: 0,
       shieldUntil: 0,
+      pingOffset: Math.random() * STEALTH_PING_EVERY_MS,
       kills: 0,
       deaths: 0,
     };
@@ -63,6 +69,8 @@ export class Game {
       turn: clampUnit(input.turn),
       throttle: clampUnit(input.throttle),
       fire: input.fire === true,
+      missile: input.missile === true,
+      skill: input.skill === true,
     };
   }
 
@@ -75,15 +83,17 @@ export class Game {
         continue;
       }
       const spec = PLANES[p.planeId];
-      const shielded = now < p.shieldUntil;
       // Shielded planes can't fire, so spawn protection can't be abused.
-      const input = shielded ? { ...p.input, fire: false } : p.input;
-      const shot = stepPlane(p.state, spec, input, dt, p.id);
-      if (shot) this.bullets.push(shot);
+      const input = now < p.shieldUntil ? { ...p.input, fire: false, missile: false } : p.input;
+      const shots = stepPlane(p.state, spec, input, dt, p.id);
+      if (shots.bullet) this.bullets.push(shots.bullet);
+      if (shots.missile) this.missiles.push(shots.missile);
     }
 
     stepBullets(this.bullets, dt);
-    this.resolveHits(now);
+    for (const m of stepMissiles(this.missiles, dt)) this.explode(m, now);
+    this.resolveBulletHits(now);
+    this.resolveMissileHits(now);
 
     this.broadcast({
       t: 'snap',
@@ -92,32 +102,66 @@ export class Game {
         id: p.id,
         name: p.name,
         planeId: p.planeId,
-        x: round(p.state.x),
-        y: round(p.state.y),
+        x: Math.round(p.state.x),
+        y: Math.round(p.state.y),
         angle: Math.round(p.state.angle * 1000) / 1000,
         speed: Math.round(p.state.speed),
         hp: p.state.hp,
         alive: p.alive,
         shielded: now < p.shieldUntil,
+        onRadar: this.onRadar(p, now),
+        missiles: p.state.missiles,
         kills: p.kills,
         deaths: p.deaths,
       })),
-      bullets: this.bullets.map((b) => ({ x: round(b.x), y: round(b.y), angle: round(Math.atan2(b.vy, b.vx) * 100) / 100 })),
+      bullets: this.bullets.map(snapProjectile),
+      missiles: this.missiles.map(snapProjectile),
     });
   }
 
-  private resolveHits(now: number): void {
+  private onRadar(p: Player, now: number): boolean {
+    if (PLANES[p.planeId].skill !== 'stealth') return true;
+    return (now + p.pingOffset) % STEALTH_PING_EVERY_MS < STEALTH_PING_MS;
+  }
+
+  private resolveBulletHits(now: number): void {
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       const b = this.bullets[i];
       for (const p of this.players.values()) {
         if (!p.alive || p.id === b.ownerId || !hits(b, p.state.x, p.state.y, PLANE_RADIUS)) continue;
         this.bullets.splice(i, 1);
-        if (now < p.shieldUntil) break;
-        p.state.hp -= b.damage;
-        if (p.state.hp <= 0) this.kill(p, b.ownerId, now);
+        this.damage(p, b.damage, b.ownerId, now);
         break;
       }
     }
+  }
+
+  private resolveMissileHits(now: number): void {
+    for (let i = this.missiles.length - 1; i >= 0; i--) {
+      const m = this.missiles[i];
+      for (const p of this.players.values()) {
+        if (!p.alive || p.id === m.ownerId || !hits(m, p.state.x, p.state.y, MISSILE.hitRadius)) continue;
+        this.missiles.splice(i, 1);
+        this.explode(m, now);
+        break;
+      }
+    }
+  }
+
+  /** Blast damage to everyone in range except the shooter. */
+  private explode(m: Missile, now: number): void {
+    this.broadcast({ t: 'boom', x: Math.round(m.x), y: Math.round(m.y) });
+    for (const p of this.players.values()) {
+      if (!p.alive || p.id === m.ownerId) continue;
+      const dmg = blastDamage(Math.hypot(p.state.x - m.x, p.state.y - m.y));
+      if (dmg > 0) this.damage(p, dmg, m.ownerId, now);
+    }
+  }
+
+  private damage(p: Player, amount: number, attackerId: string, now: number): void {
+    if (now < p.shieldUntil) return;
+    p.state.hp -= amount;
+    if (p.state.hp <= 0) this.kill(p, attackerId, now);
   }
 
   private kill(victim: Player, killerId: string, now: number): void {
@@ -143,10 +187,10 @@ export class Game {
   }
 }
 
-function clampUnit(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) : 0;
+function snapProjectile(b: { x: number; y: number; vx: number; vy: number }) {
+  return { x: Math.round(b.x), y: Math.round(b.y), angle: Math.round(Math.atan2(b.vy, b.vx) * 100) / 100 };
 }
 
-function round(v: number): number {
-  return Math.round(v);
+function clampUnit(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) : 0;
 }

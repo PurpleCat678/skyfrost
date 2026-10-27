@@ -1,4 +1,4 @@
-import type { ClientMessage, PlayerSnapshot, ServerMessage } from '../shared/protocol';
+import type { ClientMessage, PlayerSnapshot, ProjectileSnapshot, ServerMessage } from '../shared/protocol';
 import type { PlaneInput } from '../shared/types';
 
 // How far behind real time we render, so there are always two snapshots to blend between.
@@ -8,7 +8,8 @@ const INPUT_RESEND_MS = 250;
 interface TimedSnap {
   at: number; // local arrival time
   players: Map<string, PlayerSnapshot>;
-  bullets: { x: number; y: number; angle: number }[];
+  bullets: ProjectileSnapshot[];
+  missiles: ProjectileSnapshot[];
 }
 
 export interface KillEvent {
@@ -22,6 +23,7 @@ export class Network {
   myId: string | null = null;
   connected = false;
   onKill: (e: KillEvent) => void = () => {};
+  onBoom: (x: number, y: number) => void = () => {};
   private ws: WebSocket;
   private snaps: TimedSnap[] = [];
   private lastInput = '';
@@ -39,7 +41,7 @@ export class Network {
   }
 
   sendInput(input: PlaneInput): void {
-    const key = `${input.turn}|${input.throttle}|${input.fire}`;
+    const key = `${input.turn}|${input.throttle}|${input.fire}|${input.missile}|${input.skill}`;
     const now = performance.now();
     if (key === this.lastInput && now - this.lastSentAt < INPUT_RESEND_MS) return;
     this.lastInput = key;
@@ -47,15 +49,23 @@ export class Network {
     this.send({ t: 'input', ...input });
   }
 
-  latest(): TimedSnap | undefined {
-    return this.snaps[this.snaps.length - 1];
+  /** Index of the first snapshot at or after the render time. */
+  private renderIndex(): number {
+    const renderAt = performance.now() - INTERP_DELAY_MS;
+    let i = this.snaps.length - 1;
+    while (i > 0 && this.snaps[i - 1].at > renderAt) i--;
+    return i;
+  }
+
+  /** The snapshot at the render time, so bullets and missiles line up with the planes. */
+  current(): TimedSnap | undefined {
+    return this.snaps[this.renderIndex()];
   }
 
   /** Players blended between the two snapshots around the render time. */
   interpolatedPlayers(): PlayerSnapshot[] {
     const renderAt = performance.now() - INTERP_DELAY_MS;
-    let i = this.snaps.length - 1;
-    while (i > 0 && this.snaps[i - 1].at > renderAt) i--;
+    const i = this.renderIndex();
     const to = this.snaps[i];
     const from = this.snaps[i - 1];
     if (!to) return [];
@@ -78,8 +88,11 @@ export class Network {
         at: performance.now(),
         players: new Map(msg.players.map((p) => [p.id, p])),
         bullets: msg.bullets,
+        missiles: msg.missiles,
       });
       if (this.snaps.length > 30) this.snaps.shift();
+    } else if (msg.t === 'boom') {
+      this.onBoom(msg.x, msg.y);
     } else if (msg.t === 'kill') {
       this.onKill(msg);
     }
