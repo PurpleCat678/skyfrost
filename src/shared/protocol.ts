@@ -5,10 +5,12 @@ export const RESPAWN_MS = 3000;
 export const SPAWN_SHIELD_MS = 2000;
 export const PLANE_RADIUS = 20;
 export const MAX_NAME_LENGTH = 16;
+export const STEALTH_PING_EVERY_MS = 3000;
+export const STEALTH_PING_MS = 400;
 
 export type ClientMessage =
   | { t: 'join'; name: string; planeId: string }
-  | { t: 'input'; turn: number; throttle: number; fire: boolean };
+  | ({ t: 'input' } & import('./types').PlaneInput);
 
 export interface PlayerSnapshot {
   id: string;
@@ -21,11 +23,13 @@ export interface PlayerSnapshot {
   hp: number;
   alive: boolean;
   shielded: boolean;
+  onRadar: boolean; // false while a stealth plane is between pings
+  missiles: number;
   kills: number;
   deaths: number;
 }
 
-export interface BulletSnapshot {
+export interface ProjectileSnapshot {
   x: number;
   y: number;
   angle: number;
@@ -33,5 +37,12 @@ export interface BulletSnapshot {
 
 export type ServerMessage =
   | { t: 'welcome'; id: string }
-  | { t: 'snap'; time: number; players: PlayerSnapshot[]; bullets: BulletSnapshot[] }
+  | {
+      t: 'snap';
+      time: number;
+      players: PlayerSnapshot[];
+      bullets: ProjectileSnapshot[];
+      missiles: ProjectileSnapshot[];
+    }
+  | { t: 'boom'; x: number; y: number }
   | { t: 'kill'; killer: string; victim: string; x: number; y: number };

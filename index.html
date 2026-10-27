@@ -6,18 +6,29 @@
     <title>Skyfrost</title>
     <style>
       html, body { margin: 0; height: 100%; background: #0b1020; overflow: hidden; font-family: ui-monospace, monospace; color: #cfe0ff; }
-      #join { position: fixed; inset: 0; display: grid; place-content: center; gap: 16px; text-align: center; }
+      #join { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 16px; overflow-y: auto; }
       #join h1 { margin: 0; font-size: 48px; letter-spacing: 0.2em; color: #e6f0ff; }
-      #join input { font: inherit; font-size: 18px; padding: 10px 14px; width: 260px; background: #141c33; color: #e6f0ff; border: 1px solid #3a5a9a; border-radius: 6px; outline: none; text-align: center; }
+      #join input { font: inherit; font-size: 18px; padding: 10px 14px; width: 260px; max-width: 100%; background: #141c33; color: #e6f0ff; border: 1px solid #3a5a9a; border-radius: 6px; outline: none; text-align: center; }
       #join input:focus { border-color: #7fa8ff; }
-      #join p { margin: 0; color: #7f93bf; }
+      #join .hint { margin: 0; color: #7f93bf; }
+      #planes { display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
+      .plane { width: 220px; padding: 14px; background: #111830; border: 2px solid #22305a; border-radius: 10px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+      .plane.selected { border-color: #7fa8ff; background: #16203f; }
+      .plane h2 { margin: 0; font-size: 16px; color: #e6f0ff; }
+      .plane .skill { font-size: 12px; color: #ffd28a; text-align: center; min-height: 30px; margin: 0; }
+      .stats { width: 100%; display: grid; grid-template-columns: 70px 1fr; gap: 4px 8px; font-size: 11px; align-items: center; }
+      .bar { height: 6px; background: #22305a; border-radius: 3px; overflow: hidden; }
+      .bar span { display: block; height: 100%; background: #7fa8ff; }
+      .flag { width: 48px; height: 30px; border: 1px solid #22305a; display: block; }
+      .country { font-size: 11px; color: #7f93bf; margin-top: -4px; }
     </style>
   </head>
   <body>
     <div id="join">
       <h1>SKYFROST</h1>
       <input id="name" maxlength="16" placeholder="Callsign" autocomplete="off" />
-      <p>Press Enter to fly</p>
+      <div id="planes"></div>
+      <p class="hint">← → to pick a plane · Enter to fly</p>
     </div>
     <script type="module" src="/src/client/main.ts"></script>
   </body>

@@ -1,29 +1,47 @@
 import { ARENA } from './arena';
-import type { Bullet, PlaneInput, PlaneSpec, PlaneState } from './types';
+import { MISSILE } from './weapons';
+import type { Bullet, Missile, PlaneInput, PlaneSpec, PlaneState } from './types';
 
 const BULLET_TTL = 1.1;
 const NOSE_OFFSET = 26;
+const AIRBRAKE_DECEL = 2.5; // multiple of normal accel
+const AIRBRAKE_TURN = 1.6; // multiple of normal turn rate
 
 export function spawnPlane(spec: PlaneSpec, x: number, y: number, angle = 0): PlaneState {
-  return { x, y, angle, speed: (spec.minSpeed + spec.maxSpeed) / 2, hp: spec.maxHp, fireCooldown: 0 };
+  return {
+    x,
+    y,
+    angle,
+    speed: (spec.minSpeed + spec.maxSpeed) / 2,
+    hp: spec.maxHp,
+    fireCooldown: 0,
+    missiles: spec.missiles,
+    missileCooldown: 0,
+    missileReload: 0,
+  };
 }
 
-/** Advances one plane by dt seconds. Returns a bullet if the plane fired this step. */
-export function stepPlane(
-  s: PlaneState,
-  spec: PlaneSpec,
-  input: PlaneInput,
-  dt: number,
-  ownerId: string,
-): Bullet | null {
-  s.angle += input.turn * spec.turnRate * dt;
+export interface Shots {
+  bullet: Bullet | null;
+  missile: Missile | null;
+}
+
+/** Advances one plane by dt seconds and returns anything it fired this step. */
+export function stepPlane(s: PlaneState, spec: PlaneSpec, input: PlaneInput, dt: number, ownerId: string): Shots {
+  const braking = spec.skill === 'airbrake' && input.skill;
+
+  s.angle += input.turn * spec.turnRate * (braking ? AIRBRAKE_TURN : 1) * dt;
 
   // Without throttle input the jet settles back to cruise speed.
   const cruise = (spec.minSpeed + spec.maxSpeed) / 2;
-  const target = input.throttle > 0 ? spec.maxSpeed : input.throttle < 0 ? spec.minSpeed : cruise;
-  const delta = target - s.speed;
-  const maxChange = spec.accel * dt;
-  s.speed += Math.max(-maxChange, Math.min(maxChange, delta));
+  let target = input.throttle > 0 ? spec.maxSpeed : input.throttle < 0 ? spec.minSpeed : cruise;
+  let accel = spec.accel;
+  if (braking) {
+    target = 0;
+    accel *= AIRBRAKE_DECEL;
+  }
+  const maxChange = accel * dt;
+  s.speed += Math.max(-maxChange, Math.min(maxChange, target - s.speed));
 
   s.x += Math.cos(s.angle) * s.speed * dt;
   s.y += Math.sin(s.angle) * s.speed * dt;
@@ -38,13 +56,15 @@ export function stepPlane(
     s.angle = -s.angle;
   }
 
+  const cos = Math.cos(s.angle);
+  const sin = Math.sin(s.angle);
+  const shots: Shots = { bullet: null, missile: null };
+
   s.fireCooldown = Math.max(0, s.fireCooldown - dt);
   if (input.fire && s.fireCooldown === 0) {
     s.fireCooldown = spec.fireInterval;
-    const cos = Math.cos(s.angle);
-    const sin = Math.sin(s.angle);
     const v = s.speed + spec.bulletSpeed;
-    return {
+    shots.bullet = {
       x: s.x + cos * NOSE_OFFSET,
       y: s.y + sin * NOSE_OFFSET,
       vx: cos * v,
@@ -54,7 +74,31 @@ export function stepPlane(
       ownerId,
     };
   }
-  return null;
+
+  // Missiles reload one at a time.
+  if (s.missiles < spec.missiles) {
+    s.missileReload -= dt;
+    if (s.missileReload <= 0) {
+      s.missiles++;
+      s.missileReload = s.missiles < spec.missiles ? spec.missileReload : 0;
+    }
+  }
+  s.missileCooldown = Math.max(0, s.missileCooldown - dt);
+  if (input.missile && s.missiles > 0 && s.missileCooldown === 0) {
+    if (s.missiles === spec.missiles) s.missileReload = spec.missileReload;
+    s.missiles--;
+    s.missileCooldown = MISSILE.launchGap;
+    shots.missile = {
+      x: s.x + cos * NOSE_OFFSET,
+      y: s.y + sin * NOSE_OFFSET,
+      vx: cos * MISSILE.speed,
+      vy: sin * MISSILE.speed,
+      ttl: MISSILE.ttl,
+      ownerId,
+    };
+  }
+
+  return shots;
 }
 
 /** Moves bullets and drops expired or out-of-bounds ones, in place. */
@@ -70,8 +114,25 @@ export function stepBullets(bullets: Bullet[], dt: number): void {
   }
 }
 
-export function hits(b: Bullet, x: number, y: number, radius: number): boolean {
-  const dx = b.x - x;
-  const dy = b.y - y;
+/** Moves missiles; returns the ones that timed out or reached the wall, removed from the list. */
+export function stepMissiles(missiles: Missile[], dt: number): Missile[] {
+  const detonated: Missile[] = [];
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    const m = missiles[i];
+    m.x += m.vx * dt;
+    m.y += m.vy * dt;
+    m.ttl -= dt;
+    if (m.ttl <= 0 || m.x <= 0 || m.y <= 0 || m.x >= ARENA.width || m.y >= ARENA.height) {
+      m.x = Math.max(0, Math.min(ARENA.width, m.x));
+      m.y = Math.max(0, Math.min(ARENA.height, m.y));
+      detonated.push(...missiles.splice(i, 1));
+    }
+  }
+  return detonated;
+}
+
+export function hits(p: { x: number; y: number }, x: number, y: number, radius: number): boolean {
+  const dx = p.x - x;
+  const dy = p.y - y;
   return dx * dx + dy * dy <= radius * radius;
 }

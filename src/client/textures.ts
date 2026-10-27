@@ -1,32 +1,19 @@
 import Phaser from 'phaser';
+import { COCKPITS, SHAPES } from './shapes';
 
 // Placeholder art drawn at startup, so the MVP needs no image files.
 export function makeTextures(scene: Phaser.Scene): void {
   const g = scene.make.graphics({}, false);
 
-  // Jet, nose pointing right (angle 0).
-  g.clear();
-  g.fillStyle(0xffffff);
-  g.fillPoints(
-    [
-      { x: 52, y: 24 }, // nose
-      { x: 30, y: 19 },
-      { x: 22, y: 4 }, // left wingtip
-      { x: 14, y: 4 },
-      { x: 16, y: 18 },
-      { x: 4, y: 14 }, // left tail
-      { x: 6, y: 24 },
-      { x: 4, y: 34 }, // right tail
-      { x: 16, y: 30 },
-      { x: 14, y: 44 },
-      { x: 22, y: 44 }, // right wingtip
-      { x: 30, y: 29 },
-    ],
-    true,
-  );
-  g.fillStyle(0x1b2a3a);
-  g.fillEllipse(38, 24, 10, 5); // cockpit
-  g.generateTexture('jet', 56, 48);
+  // One white jet per plane type, tinted at runtime. Nose points right.
+  for (const [id, points] of Object.entries(SHAPES)) {
+    g.clear();
+    g.fillStyle(0xffffff);
+    g.fillPoints(points, true);
+    g.fillStyle(0x1b2a3a);
+    g.fillEllipse(COCKPITS[id].x, COCKPITS[id].y, 10, 5);
+    g.generateTexture(`jet-${id}`, 56, 48);
+  }
 
   // Bullet tracer.
   g.clear();
@@ -34,7 +21,15 @@ export function makeTextures(scene: Phaser.Scene): void {
   g.fillRect(0, 0, 12, 3);
   g.generateTexture('bullet', 12, 3);
 
-  // Particle dot for explosions and exhaust.
+  // Missile body with a red tip.
+  g.clear();
+  g.fillStyle(0xe6e6e6);
+  g.fillRect(0, 1, 16, 4);
+  g.fillStyle(0xd9534f);
+  g.fillTriangle(16, 0, 22, 3, 16, 6);
+  g.generateTexture('missile', 22, 6);
+
+  // Particle dot for explosions, exhaust, and smoke trails.
   g.clear();
   g.fillStyle(0xffffff);
   g.fillCircle(4, 4, 4);

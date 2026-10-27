@@ -1,14 +1,18 @@
 import Phaser from 'phaser';
 import { ARENA } from '../shared/arena';
-import { PLANES } from '../shared/planes';
-import type { PlayerSnapshot } from '../shared/protocol';
+import { PLANES, PX_PER_MACH } from '../shared/planes';
+import type { PlayerSnapshot, ProjectileSnapshot } from '../shared/protocol';
 import type { PlaneInput } from '../shared/types';
+import { MISSILE } from '../shared/weapons';
 import type { KillEvent, Network } from './network';
 import { makeTextures } from './textures';
 
 const ENEMY_TINT = 0xff8a7a;
 const FEED_SIZE = 5;
 const FEED_TTL_MS = 6000;
+const RADAR_RADIUS = 80; // on screen, px
+const RADAR_RANGE = 1600; // in the world, px
+const RADAR_MARGIN = 20;
 
 interface PlaneView {
   sprite: Phaser.GameObjects.Image;
@@ -19,10 +23,13 @@ interface PlaneView {
 export class ArenaScene extends Phaser.Scene {
   private views = new Map<string, PlaneView>();
   private bulletSprites: Phaser.GameObjects.Image[] = [];
+  private missileSprites: Phaser.GameObjects.Image[] = [];
   private explosions!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private smoke!: Phaser.GameObjects.Particles.ParticleEmitter;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
   private hud!: Phaser.GameObjects.Text;
   private hpBar!: Phaser.GameObjects.Graphics;
+  private radar!: Phaser.GameObjects.Graphics;
   private board!: Phaser.GameObjects.Text;
   private feedText!: Phaser.GameObjects.Text;
   private banner!: Phaser.GameObjects.Text;
@@ -41,6 +48,14 @@ export class ArenaScene extends Phaser.Scene {
     this.add.tileSprite(0, 0, ARENA.width, ARENA.height, 'grid').setOrigin(0);
     this.add.rectangle(0, 0, ARENA.width, ARENA.height).setOrigin(0).setStrokeStyle(4, 0x3a5a9a);
 
+    this.smoke = this.add.particles(0, 0, 'dot', {
+      lifespan: 500,
+      speed: { min: 0, max: 15 },
+      scale: { start: 0.6, end: 0 },
+      alpha: { start: 0.5, end: 0 },
+      tint: 0xbfc8d8,
+      emitting: false,
+    });
     this.explosions = this.add
       .particles(0, 0, 'dot', {
         lifespan: 700,
@@ -54,27 +69,38 @@ export class ArenaScene extends Phaser.Scene {
     this.cameras.main.setBounds(-200, -200, ARENA.width + 400, ARENA.height + 400);
 
     const kb = this.input.keyboard!;
-    this.keys = kb.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE') as Record<string, Phaser.Input.Keyboard.Key>;
-    kb.addCapture('SPACE,UP,DOWN,LEFT,RIGHT');
+    this.keys = kb.addKeys('W,A,S,D,F,UP,DOWN,LEFT,RIGHT,SPACE,SHIFT') as Record<string, Phaser.Input.Keyboard.Key>;
+    kb.addCapture('SPACE,UP,DOWN,LEFT,RIGHT,SHIFT');
+    this.input.mouse?.disableContextMenu();
 
     const font = { fontFamily: 'monospace', fontSize: '14px', color: '#cfe0ff' };
     this.hpBar = this.add.graphics().setScrollFactor(0).setDepth(10);
+    this.radar = this.add.graphics().setScrollFactor(0).setDepth(10);
     this.hud = this.add.text(16, 40, '', font).setScrollFactor(0).setDepth(10);
     this.board = this.add.text(0, 16, '', { ...font, align: 'right' }).setScrollFactor(0).setDepth(10).setOrigin(1, 0);
-    this.feedText = this.add.text(0, 0, '', { ...font, align: 'right', color: '#ffd28a' }).setScrollFactor(0).setDepth(10).setOrigin(1, 0);
+    this.feedText = this.add
+      .text(0, 0, '', { ...font, align: 'right', color: '#ffd28a' })
+      .setScrollFactor(0)
+      .setDepth(10)
+      .setOrigin(1, 0);
     this.banner = this.add
       .text(0, 0, '', { ...font, fontSize: '22px', color: '#ffffff', align: 'center' })
       .setScrollFactor(0)
       .setDepth(10)
       .setOrigin(0.5);
     this.help = this.add
-      .text(16, 0, 'W/S throttle · A/D turn · SPACE fire', { ...font, fontSize: '12px', color: '#7f93bf' })
+      .text(16, 0, 'W/S throttle · A/D turn · SPACE guns · F or right-click missile · SHIFT skill', {
+        ...font,
+        fontSize: '12px',
+        color: '#7f93bf',
+      })
       .setScrollFactor(0)
       .setDepth(10);
     this.scale.on('resize', () => this.layout());
     this.layout();
 
     this.net.onKill = (e) => this.handleKill(e);
+    this.net.onBoom = (x, y) => this.handleBoom(x, y);
   }
 
   update(): void {
@@ -83,8 +109,12 @@ export class ArenaScene extends Phaser.Scene {
     const players = this.net.interpolatedPlayers();
     for (const p of players) this.names.set(p.id, p.name);
     this.syncPlanes(players);
-    this.syncBullets();
+    const snap = this.net.current();
+    this.syncProjectiles(this.bulletSprites, snap?.bullets ?? [], 'bullet');
+    this.syncProjectiles(this.missileSprites, snap?.missiles ?? [], 'missile');
+    for (const m of snap?.missiles ?? []) this.smoke.emitParticleAt(m.x - Math.cos(m.angle) * 10, m.y - Math.sin(m.angle) * 10);
     this.updateHud(players);
+    this.drawRadar(players);
   }
 
   private readInput(): PlaneInput {
@@ -97,6 +127,8 @@ export class ArenaScene extends Phaser.Scene {
       turn: (right ? 1 : 0) - (left ? 1 : 0),
       throttle: (up ? 1 : 0) - (down ? 1 : 0),
       fire: k.SPACE.isDown,
+      missile: k.F.isDown || this.input.activePointer.rightButtonDown(),
+      skill: k.SHIFT.isDown,
     };
   }
 
@@ -114,7 +146,7 @@ export class ArenaScene extends Phaser.Scene {
       // Blink while spawn-shielded.
       sprite.setAlpha(p.shielded ? 0.4 + 0.4 * Math.sin(this.time.now / 60) : 1);
       label.setVisible(p.alive).setPosition(p.x, p.y - 36);
-      exhaust.emitting = p.alive;
+      exhaust.emitting = p.alive && p.speed > 20;
       exhaust.setPosition(p.x - Math.cos(p.angle) * 26, p.y - Math.sin(p.angle) * 26);
     }
     for (const [id, view] of this.views) {
@@ -136,7 +168,7 @@ export class ArenaScene extends Phaser.Scene {
       tint: [0xffb347, 0xff6a3d],
       frequency: 16,
     });
-    const sprite = this.add.image(p.x, p.y, 'jet').setTint(mine ? PLANES[p.planeId].color : ENEMY_TINT);
+    const sprite = this.add.image(p.x, p.y, `jet-${p.planeId}`).setTint(mine ? PLANES[p.planeId].color : ENEMY_TINT);
     const label = this.add
       .text(p.x, p.y, p.name, { fontFamily: 'monospace', fontSize: '12px', color: mine ? '#cfe0ff' : '#ffb3a8' })
       .setOrigin(0.5);
@@ -144,14 +176,23 @@ export class ArenaScene extends Phaser.Scene {
     return { sprite, label, exhaust };
   }
 
-  private syncBullets(): void {
-    const bullets = this.net.latest()?.bullets ?? [];
-    while (this.bulletSprites.length < bullets.length) this.bulletSprites.push(this.add.image(0, 0, 'bullet'));
-    this.bulletSprites.forEach((s, i) => {
-      const b = bullets[i];
+  // Reuses sprites instead of creating one per shot.
+  private syncProjectiles(pool: Phaser.GameObjects.Image[], items: ProjectileSnapshot[], texture: string): void {
+    while (pool.length < items.length) pool.push(this.add.image(0, 0, texture));
+    pool.forEach((s, i) => {
+      const b = items[i];
       s.setVisible(!!b);
       if (b) s.setPosition(b.x, b.y).setRotation(b.angle);
     });
+  }
+
+  private handleBoom(x: number, y: number): void {
+    this.explosions.explode(30, x, y);
+    // A ring showing the real blast radius.
+    const ring = this.add.circle(x, y, MISSILE.blastRadius).setStrokeStyle(3, 0xffb347).setDepth(5).setScale(0.2);
+    this.tweens.add({ targets: ring, scale: 1, alpha: 0, duration: 350, onComplete: () => ring.destroy() });
+    const cam = this.cameras.main;
+    if (Phaser.Math.Distance.Between(cam.midPoint.x, cam.midPoint.y, x, y) < 700) cam.shake(120, 0.004);
   }
 
   private handleKill(e: KillEvent): void {
@@ -174,7 +215,10 @@ export class ArenaScene extends Phaser.Scene {
       const frac = Math.max(0, me.hp / spec.maxHp);
       this.hpBar.fillStyle(0x1a2440).fillRect(16, 16, 200, 14);
       this.hpBar.fillStyle(frac > 0.3 ? 0x4cd97b : 0xd9534f).fillRect(16, 16, 200 * frac, 14);
-      this.hud.setText(`${spec.name}\nSPD ${me.speed}\nK ${me.kills}  D ${me.deaths}`);
+      const pips = '▮'.repeat(me.missiles) + '▯'.repeat(spec.missiles - me.missiles);
+      this.hud.setText(
+        `${spec.name}\nMACH ${(me.speed / PX_PER_MACH).toFixed(2)}\nMSL  ${pips}\nK ${me.kills}  D ${me.deaths}`,
+      );
     } else {
       this.hud.setText(this.net.connected ? 'Joining…' : 'Connecting to server…');
     }
@@ -188,6 +232,57 @@ export class ArenaScene extends Phaser.Scene {
 
     this.feed = this.feed.filter((f) => this.time.now - f.at < FEED_TTL_MS);
     this.feedText.setText(this.feed.map((f) => f.text).join('\n'));
+  }
+
+  private drawRadar(players: PlayerSnapshot[]): void {
+    const g = this.radar;
+    const cx = this.scale.width - RADAR_MARGIN - RADAR_RADIUS;
+    const cy = this.scale.height - RADAR_MARGIN - RADAR_RADIUS;
+    const me = players.find((p) => p.id === this.net.myId);
+    const scale = RADAR_RADIUS / RADAR_RANGE;
+
+    g.clear();
+    g.fillStyle(0x07101f, 0.85).fillCircle(cx, cy, RADAR_RADIUS);
+    g.lineStyle(1, 0x2a4a7a).strokeCircle(cx, cy, RADAR_RADIUS).strokeCircle(cx, cy, RADAR_RADIUS / 2);
+    if (!me) return;
+
+    const plot = (x: number, y: number) => {
+      const dx = (x - me.x) * scale;
+      const dy = (y - me.y) * scale;
+      return dx * dx + dy * dy <= RADAR_RADIUS * RADAR_RADIUS ? { x: cx + dx, y: cy + dy } : null;
+    };
+
+    // Arena walls, as a dotted line where they're in range.
+    g.fillStyle(0x3a5a9a);
+    for (let d = 0; d <= ARENA.width; d += 80) {
+      for (const [x, y] of [
+        [d, 0],
+        [d, ARENA.height],
+        [0, d],
+        [ARENA.width, d],
+      ]) {
+        const pt = plot(x, y);
+        if (pt) g.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+      }
+    }
+
+    g.fillStyle(0xff5a4a);
+    for (const p of players) {
+      if (p.id === me.id || !p.alive || !p.onRadar) continue;
+      const pt = plot(p.x, p.y);
+      if (pt) g.fillCircle(pt.x, pt.y, 3);
+    }
+
+    // You, as an arrow in the middle.
+    const a = me.angle;
+    g.fillStyle(0xcfe0ff).fillTriangle(
+      cx + Math.cos(a) * 7,
+      cy + Math.sin(a) * 7,
+      cx + Math.cos(a + 2.5) * 5,
+      cy + Math.sin(a + 2.5) * 5,
+      cx + Math.cos(a - 2.5) * 5,
+      cy + Math.sin(a - 2.5) * 5,
+    );
   }
 
   private layout(): void {
