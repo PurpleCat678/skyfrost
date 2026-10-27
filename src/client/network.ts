@@ -3,6 +3,7 @@ import type { PlaneInput } from '../shared/types';
 
 // How far behind real time we render, so there are always two snapshots to blend between.
 const INTERP_DELAY_MS = 100;
+const INPUT_MIN_GAP_MS = 33; // the server only ticks 30 times a second anyway
 const INPUT_RESEND_MS = 250;
 
 interface TimedSnap {
@@ -29,20 +30,21 @@ export class Network {
   private lastInput = '';
   private lastSentAt = 0;
 
-  constructor(name: string, planeId: string) {
+  constructor(name: string, planeId: string, bots: number) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws.onopen = () => {
       this.connected = true;
-      this.send({ t: 'join', name, planeId });
+      this.send({ t: 'join', name, planeId, bots });
     };
     this.ws.onclose = () => (this.connected = false);
     this.ws.onmessage = (ev) => this.handle(JSON.parse(ev.data) as ServerMessage);
   }
 
   sendInput(input: PlaneInput): void {
-    const key = `${input.turn}|${input.throttle}|${input.fire}|${input.missile}|${input.skill}`;
+    const key = JSON.stringify({ ...input, aimX: Math.round(input.aimX), aimY: Math.round(input.aimY) });
     const now = performance.now();
+    if (now - this.lastSentAt < INPUT_MIN_GAP_MS) return;
     if (key === this.lastInput && now - this.lastSentAt < INPUT_RESEND_MS) return;
     this.lastInput = key;
     this.lastSentAt = now;

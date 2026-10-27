@@ -50,6 +50,7 @@ wss.on('connection', (ws) => {
     if (msg.t === 'join' && !sockets.has(id)) {
       sockets.set(id, ws);
       game.join(id, String(msg.name ?? ''), String(msg.planeId ?? ''));
+      if (msg.bots !== undefined) game.setBotCount(msg.bots);
       ws.send(JSON.stringify({ t: 'welcome', id } satisfies ServerMessage));
     } else if (msg.t === 'input') {
       game.setInput(id, msg);
@@ -59,6 +60,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     sockets.delete(id);
     game.leave(id);
+    // Nobody left to fight them: send the AI pilots home.
+    if (sockets.size === 0) game.setBotCount(0);
   });
 });
 

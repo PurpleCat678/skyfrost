@@ -1,5 +1,6 @@
 import { PLANES, PLANE_ORDER, PX_PER_MACH } from '../shared/planes';
 import type { Faction } from '../shared/types';
+import { MAX_BOTS } from '../shared/protocol';
 import { shapeSvg } from './shapes';
 
 const FLAGS: Record<Faction, { label: string; svg: string }> = {
@@ -43,12 +44,15 @@ function bars(id: string): string {
 }
 
 /** Renders the plane cards and calls onPick when the player presses Enter. */
-export function setupPicker(onPick: (name: string, planeId: string) => void): void {
+export function setupPicker(onPick: (name: string, planeId: string, bots: number) => void): void {
   const root = document.getElementById('planes')!;
   const nameInput = document.getElementById('name') as HTMLInputElement;
   let selected = load('skyfrost:plane', PLANE_ORDER[0]);
   if (!PLANES[selected]) selected = PLANE_ORDER[0];
   nameInput.value = load('skyfrost:name', '');
+  const botsSelect = document.getElementById('bots') as HTMLSelectElement;
+  botsSelect.innerHTML = Array.from({ length: MAX_BOTS + 1 }, (_, n) => `<option value="${n}">${n}</option>`).join('');
+  botsSelect.value = load('skyfrost:bots', '0');
 
   root.innerHTML = PLANE_ORDER.map((id) => {
     const s = PLANES[id];
@@ -88,8 +92,9 @@ export function setupPicker(onPick: (name: string, planeId: string) => void): vo
       const name = nameInput.value.trim();
       save('skyfrost:name', name);
       save('skyfrost:plane', selected);
+      save('skyfrost:bots', botsSelect.value);
       document.getElementById('join')!.remove();
-      onPick(name, selected);
+      onPick(name, selected, Number(botsSelect.value));
     }
   };
   window.addEventListener('keydown', onKey);

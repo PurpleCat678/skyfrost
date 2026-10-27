@@ -1,5 +1,5 @@
 import { ARENA } from './arena';
-import { MISSILE } from './weapons';
+import { GUN, MISSILE, missileTurnRate } from './weapons';
 import type { Bullet, Missile, PlaneInput, PlaneSpec, PlaneState } from './types';
 
 const BULLET_TTL = 1.1;
@@ -15,6 +15,8 @@ export function spawnPlane(spec: PlaneSpec, x: number, y: number, angle = 0): Pl
     speed: (spec.minSpeed + spec.maxSpeed) / 2,
     hp: spec.maxHp,
     fireCooldown: 0,
+    heat: 0,
+    overheated: false,
     missiles: spec.missiles,
     missileCooldown: 0,
     missileReload: 0,
@@ -26,8 +28,22 @@ export interface Shots {
   missile: Missile | null;
 }
 
+export interface Lock {
+  targetId: string | null;
+  progress: number; // 0..1 of a full lock
+}
+
+const NO_LOCK: Lock = { targetId: null, progress: 0 };
+
 /** Advances one plane by dt seconds and returns anything it fired this step. */
-export function stepPlane(s: PlaneState, spec: PlaneSpec, input: PlaneInput, dt: number, ownerId: string): Shots {
+export function stepPlane(
+  s: PlaneState,
+  spec: PlaneSpec,
+  input: PlaneInput,
+  dt: number,
+  ownerId: string,
+  lock: Lock = NO_LOCK,
+): Shots {
   const braking = spec.skill === 'airbrake' && input.skill;
 
   s.angle += input.turn * spec.turnRate * (braking ? AIRBRAKE_TURN : 1) * dt;
@@ -60,9 +76,17 @@ export function stepPlane(s: PlaneState, spec: PlaneSpec, input: PlaneInput, dt:
   const sin = Math.sin(s.angle);
   const shots: Shots = { bullet: null, missile: null };
 
+  // Guns heat up while firing; overheating locks them until fully cooled.
   s.fireCooldown = Math.max(0, s.fireCooldown - dt);
-  if (input.fire && s.fireCooldown === 0) {
+  const firing = input.fire && !s.overheated && s.fireCooldown === 0;
+  if (!input.fire || s.overheated) {
+    s.heat = Math.max(0, s.heat - (s.overheated ? GUN.overheatCoolPerSecond : GUN.coolPerSecond) * dt);
+    if (s.heat === 0) s.overheated = false;
+  }
+  if (firing) {
     s.fireCooldown = spec.fireInterval;
+    s.heat = Math.min(1, s.heat + GUN.heatPerShot);
+    if (s.heat >= 1) s.overheated = true;
     const v = s.speed + spec.bulletSpeed;
     shots.bullet = {
       x: s.x + cos * NOSE_OFFSET,
@@ -95,6 +119,8 @@ export function stepPlane(s: PlaneState, spec: PlaneSpec, input: PlaneInput, dt:
       vy: sin * MISSILE.speed,
       ttl: MISSILE.ttl,
       ownerId,
+      targetId: lock.progress > 0 ? lock.targetId : null,
+      turnRate: missileTurnRate(lock.progress),
     };
   }
 
@@ -114,11 +140,28 @@ export function stepBullets(bullets: Bullet[], dt: number): void {
   }
 }
 
-/** Moves missiles; returns the ones that timed out or reached the wall, removed from the list. */
-export function stepMissiles(missiles: Missile[], dt: number): Missile[] {
+/**
+ * Moves missiles, steering locked ones toward their target, and returns the
+ * ones that timed out or reached the wall, removed from the list.
+ */
+export function stepMissiles(
+  missiles: Missile[],
+  dt: number,
+  findTarget: (id: string) => { x: number; y: number } | null,
+): Missile[] {
   const detonated: Missile[] = [];
   for (let i = missiles.length - 1; i >= 0; i--) {
     const m = missiles[i];
+    const target = m.targetId ? findTarget(m.targetId) : null;
+    if (target && m.turnRate > 0) {
+      const heading = Math.atan2(m.vy, m.vx);
+      const wanted = Math.atan2(target.y - m.y, target.x - m.x);
+      const diff = Math.atan2(Math.sin(wanted - heading), Math.cos(wanted - heading));
+      const maxTurn = m.turnRate * dt;
+      const next = heading + Math.max(-maxTurn, Math.min(maxTurn, diff));
+      m.vx = Math.cos(next) * MISSILE.speed;
+      m.vy = Math.sin(next) * MISSILE.speed;
+    }
     m.x += m.vx * dt;
     m.y += m.vy * dt;
     m.ttl -= dt;

@@ -24,6 +24,7 @@ export interface PlaneSpec {
   bulletDamage: number;
   missiles: number; // missiles carried
   missileReload: number; // seconds to reload one missile
+  lockTime: number; // seconds of cursor lock for a missile that never misses
   color: number;
 }
 
@@ -34,6 +35,8 @@ export interface PlaneState {
   speed: number;
   hp: number;
   fireCooldown: number;
+  heat: number; // gun heat, 0..1
+  overheated: boolean; // guns locked until heat is back to 0
   missiles: number;
   missileCooldown: number; // short gap between launches
   missileReload: number; // time until the next missile is reloaded
@@ -45,6 +48,8 @@ export interface PlaneInput {
   fire: boolean;
   missile: boolean;
   skill: boolean;
+  aimX: number; // cursor position in the world, for missile lock
+  aimY: number;
 }
 
 export interface Bullet {
@@ -64,4 +69,6 @@ export interface Missile {
   vy: number;
   ttl: number;
   ownerId: string;
+  targetId: string | null;
+  turnRate: number; // rad/s it can steer toward its target; 0 flies straight
 }

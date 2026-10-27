@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-This starts the game server (port 2567) and the Vite dev client together. Open http://localhost:5173, type a callsign, pick a plane with ← →, and press Enter. Open a second tab to fight yourself.
+This starts the game server (port 2567) and the Vite dev client together. Open http://localhost:5173, type a callsign, pick a plane with ← →, optionally add AI pilots, and press Enter. Open a second tab to fight yourself.
 
 To run it the way it will be hosted, with one server serving both the game and the page:
 
@@ -27,20 +27,27 @@ Then open http://localhost:2567.
 | W / ↑ | Throttle up |
 | S / ↓ | Brake |
 | A / D or ← / → | Turn |
-| Space | Guns |
+| Space or left-click | Guns (they overheat after about 3s of fire) |
+| Hover the cursor on an enemy | Missile lock |
 | F or right-click | Missile |
 | Shift | Plane skill |
 
 ## Planes
 
-| Plane | Top speed | HP | Missiles | Skill |
-| --- | --- | --- | --- | --- |
-| F-22 Raptor (USA) | Mach 2.3 | 70 | 4 | Stealth: shows on enemy radar only in a brief ping every 3s |
-| Su-57 Felon (Russia) | Mach 1.9 | 140 | 6 | Airbrake: hold Shift to bleed speed to a full stop and turn faster |
+| Plane | Top speed | HP | Missiles | Full lock | Skill |
+| --- | --- | --- | --- | --- | --- |
+| F-22 Raptor (USA) | Mach 2.3 | 70 | 4 | 3s | Stealth: shows on enemy radar only in a brief ping every 3s |
+| Su-57 Felon (Russia) | Mach 1.9 | 140 | 6 | 4s | Airbrake: hold Shift to bleed speed to a full stop and turn faster |
 
-Missiles fly dead straight at 900 px/s, detonate on contact, at the arena wall, or after 12s, and blast everyone within 120 px except the shooter (60 damage at the center, 20 at the edge). One missile reloads every 6s.
+**Guns** build heat with every shot. At full heat they lock for about 2s while they cool.
 
-All of these numbers live in `src/shared/planes.ts` and `src/shared/weapons.ts`. One Mach on the HUD is 210 px/s.
+**Missiles** fly at 900 px/s and detonate on contact, at the arena wall, or after 12s. The blast hits everyone within 120 px except the shooter, for 60 damage at the center and 20 at the edge. One missile reloads every 6s.
+
+**Lock-on:** keep the cursor on an enemy to build a lock, and a ring that only you see closes in on them. A missile fired with no lock flies straight. A partial lock steers gently, and steers harder the longer you held it. A full lock steers hard and has a proximity fuse, so it doesn't miss.
+
+**AI pilots:** pick how many on the start screen (0 to 6). The number applies to the whole match, and the latest pilot to join sets it. The AI pilots leave when the last human does.
+
+All of these numbers live in `src/shared/planes.ts` and `src/shared/weapons.ts`. AI behavior is in `server/bot.ts`. One Mach on the HUD is 210 px/s.
 
 ## Layout
 

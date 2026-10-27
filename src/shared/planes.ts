@@ -20,6 +20,7 @@ export const PLANES: Record<string, PlaneSpec> = {
     bulletDamage: 8,
     missiles: 4,
     missileReload: 6,
+    lockTime: 3,
     color: 0x9fb4c8,
   },
   su57: {
@@ -38,6 +39,7 @@ export const PLANES: Record<string, PlaneSpec> = {
     bulletDamage: 8,
     missiles: 6,
     missileReload: 6,
+    lockTime: 4,
     color: 0xb7c29a,
   },
 };

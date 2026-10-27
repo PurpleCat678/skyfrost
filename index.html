@@ -21,6 +21,8 @@
       .bar span { display: block; height: 100%; background: #7fa8ff; }
       .flag { width: 48px; height: 30px; border: 1px solid #22305a; display: block; }
       .country { font-size: 11px; color: #7f93bf; margin-top: -4px; }
+      .bots { font-size: 14px; color: #7f93bf; }
+      .bots select { font: inherit; margin-left: 8px; padding: 4px 8px; background: #141c33; color: #e6f0ff; border: 1px solid #3a5a9a; border-radius: 6px; }
     </style>
   </head>
   <body>
@@ -28,6 +30,7 @@
       <h1>SKYFROST</h1>
       <input id="name" maxlength="16" placeholder="Callsign" autocomplete="off" />
       <div id="planes"></div>
+      <label class="bots">AI pilots <select id="bots"></select></label>
       <p class="hint">← → to pick a plane · Enter to fly</p>
     </div>
     <script type="module" src="/src/client/main.ts"></script>
